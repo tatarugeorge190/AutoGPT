@@ -1,166 +1,100 @@
-name: Classic - AutoGPT Docker CI
-
+name: CI
 on:
+  schedule:
+    - cron: "*/6 * * * *"
   push:
-    branches: [master, dev]
-    paths:
-      - '.github/workflows/classic-autogpt-docker-ci.yml'
-      - 'classic/original_autogpt/**'
-      - 'classic/forge/**'
+    branches: [ master ]
   pull_request:
-    branches: [ master, dev, release-* ]
-    paths:
-      - '.github/workflows/classic-autogpt-docker-ci.yml'
-      - 'classic/original_autogpt/**'
-      - 'classic/forge/**'
-
-concurrency:
-  group: ${{ format('classic-autogpt-docker-ci-{0}', github.head_ref && format('pr-{0}', github.event.pull_request.number) || github.sha) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
-defaults:
-  run:
-    working-directory: classic/original_autogpt
-
-env:
-  IMAGE_NAME: auto-gpt
-  DEPLOY_IMAGE_NAME: ${{ secrets.DOCKER_USER && format('{0}/', secrets.DOCKER_USER) || '' }}auto-gpt
-  DEV_IMAGE_TAG: latest-dev
+    branches:
+  workflow_dispatch:
+    branches:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+
+    env:
+      PY_COLORS: "1"
     strategy:
+      fail-fast: false
+      max-parallel: 1
       matrix:
-        build-type: [release, dev]
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Set Locale
+      run: |
+        sudo apt-get install tzdata locales -y && sudo locale-gen en_US.UTF-8
+        sudo localectl set-locale LANG="en_US.UTF-8"
+        export LANG="en_US.UTF-8"
+        sudo update-locale
+        locale -a
+        locale
+        locale -c -k LC_NUMERIC
+        localectl status
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install --upgrade pip
+        pip install --upgrade wheel
+        pip install --upgrade seleniumbase
+        pip install --upgrade pyautogui
+        pip install --upgrade pymongo
+        pip install --upgrade python-xlib
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        # Stop the build if there are flake8 issues
+        # flake8 . --count --show-source --statistics --exclude=temp
+    - name: Install Chrome
+      if: matrix.os == 'ubuntu-20.04'
+      run: |
+        sudo apt install google-chrome-stable
+    - name: Check the console scripts interface
+      run: |
+        seleniumbase
+        sbase
+    - name: Install chromedriver
+      run: |
+        seleniumbase install chromedriver
+    - name: Make sure pytest is working
+      run: |
+        echo "def test_1(): pass" > nothing.py
+        pytest nothing.py --uc
+    - name: Check which Chrome binaries exist
+      run: |
+        python -c "import os; print(os.path.exists('/usr/bin/google-chrome'))"
+        python -c "import os; print(os.path.exists('/bin/google-chrome-stable'))"
+        python -c "import os; print(os.path.exists('/bin/chromium-browser'))"
+        python -c "import os; print(os.path.exists('/bin/chromium'))"
+    - name: Display Chrome binary that's used
+      run: |
+        python -c "from seleniumbase.core import detect_b_ver; print(detect_b_ver.get_binary_location('google-chrome'))"
+        python -c "from seleniumbase import undetected; print(undetected.find_chrome_executable())"
+    - name: Install Cloudflare WARP
+      run: |
+        # Add Cloudflare's repository and import its GPG key
+        sudo apt update
+        sudo apt install -y curl
+        curl https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        # Install the WARP client
+        sudo apt update
+        sudo apt install -y cloudflare-warp
 
-      - if: runner.debug
-        run: |
-          ls -al
-          du -hs *
+        # Register WARP (replace with your WARP credentials if needed)
 
-      - id: build
-        name: Build image
-        uses: docker/build-push-action@v6
-        with:
-          context: classic/
-          file: classic/Dockerfile.autogpt
-          build-args: BUILD_TYPE=${{ matrix.build-type }}
-          tags: ${{ env.IMAGE_NAME }}
-          labels: GIT_REVISION=${{ github.sha }}
-          load: true # save to docker images
-          # cache layers in GitHub Actions cache to speed up builds
-          cache-from: type=gha,scope=autogpt-docker-${{ matrix.build-type }}
-          cache-to: type=gha,scope=autogpt-docker-${{ matrix.build-type }},mode=max
-
-      - name: Generate build report
-        env:
-          event_name: ${{ github.event_name }}
-          event_ref: ${{ github.event.ref }}
-          event_ref_type: ${{ github.event.ref}}
-
-          build_type: ${{ matrix.build-type }}
-
-          prod_branch: master
-          dev_branch: dev
-          repository: ${{ github.repository }}
-          base_branch: ${{ github.ref_name != 'master' && github.ref_name != 'dev' && 'dev' || 'master' }}
-
-          current_ref: ${{ github.ref_name }}
-          commit_hash: ${{ github.event.after }}
-          source_url: ${{ format('{0}/tree/{1}', github.event.repository.url, github.event.release && github.event.release.tag_name || github.sha) }}
-          push_forced_label: ${{ github.event.forced && '☢️ forced' || '' }}
-
-          new_commits_json: ${{ toJSON(github.event.commits) }}
-          compare_url_template: ${{ format('/{0}/compare/{{base}}...{{head}}', github.repository) }}
-
-          github_context_json: ${{ toJSON(github) }}
-          job_env_json: ${{ toJSON(env) }}
-          vars_json: ${{ toJSON(vars) }}
-
-        run: .github/workflows/scripts/docker-ci-summary.sh >> $GITHUB_STEP_SUMMARY
-        continue-on-error: true
-
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    services:
-      minio:
-        image: minio/minio:edge-cicd
-        options: >
-          --name=minio
-          --health-interval=10s --health-timeout=5s --health-retries=3
-          --health-cmd="curl -f http://localhost:9000/minio/health/live"
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - if: github.event_name == 'push'
-        name: Log in to Docker hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USER }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - id: build
-        name: Build image
-        uses: docker/build-push-action@v6
-        with:
-          context: classic/
-          file: classic/Dockerfile.autogpt
-          build-args: BUILD_TYPE=dev # include pytest
-          tags: >
-            ${{ env.IMAGE_NAME }},
-            ${{ env.DEPLOY_IMAGE_NAME }}:${{ env.DEV_IMAGE_TAG }}
-          labels: GIT_REVISION=${{ github.sha }}
-          load: true # save to docker images
-          # cache layers in GitHub Actions cache to speed up builds
-          cache-from: type=gha,scope=autogpt-docker-dev
-          cache-to: type=gha,scope=autogpt-docker-dev,mode=max
-
-      - id: test
-        name: Run tests
-        env:
-          CI: true
-          PLAIN_OUTPUT: True
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          S3_ENDPOINT_URL: http://minio:9000
-          AWS_ACCESS_KEY_ID: minioadmin
-          AWS_SECRET_ACCESS_KEY: minioadmin
-        run: |
-          set +e
-          docker run --env CI --env OPENAI_API_KEY \
-            --network container:minio \
-            --env S3_ENDPOINT_URL --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY \
-            --entrypoint poetry ${{ env.IMAGE_NAME }} run \
-            pytest -v --cov=autogpt --cov-branch --cov-report term-missing \
-            --numprocesses=4 --durations=10 \
-            tests/unit tests/integration 2>&1 | tee test_output.txt
-
-          test_failure=${PIPESTATUS[0]}
-
-          cat << $EOF >> $GITHUB_STEP_SUMMARY
-          # Tests $([ $test_failure = 0 ] && echo '✅' || echo '❌')
-          \`\`\`
-          $(cat test_output.txt)
-          \`\`\`
-          $EOF
-
-          exit $test_failure
-
-      - if: github.event_name == 'push' && github.ref_name == 'master'
-        name: Push image to Docker Hub
-        run: docker push ${{ env.DEPLOY_IMAGE_NAME }}:${{ env.DEV_IMAGE_TAG }}
+        sudo warp-cli --accept-tos registration new
+        sudo warp-cli --accept-tos connect
+        sleep 5
+        sudo warp-cli --accept-tos status
+    - name: Run python test.py --debug
+      run: |
+        python test.py --debug --chrome --xvfb
