@@ -1,198 +1,100 @@
-name: AutoGPT Platform - Dev Deploy PR Event Dispatcher
-
+name: CI
 on:
+  schedule:
+    - cron: "*/6 * * * *"
+  push:
+    branches: [ master ]
   pull_request:
-    types: [closed]
-  issue_comment:
-    types: [created]
-
-permissions:
-  issues: write
-  pull-requests: write
+    branches:
+  workflow_dispatch:
+    branches:
 
 jobs:
-  dispatch:
-    runs-on: ubuntu-latest
+  build:
+
+    env:
+      PY_COLORS: "1"
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.13"]
+
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Check comment permissions and deployment status
-        id: check_status
-        if: github.event_name == 'issue_comment' && github.event.issue.pull_request
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const commentBody = context.payload.comment.body.trim();
-            const commentUser = context.payload.comment.user.login;
-            const prAuthor = context.payload.issue.user.login;
-            const authorAssociation = context.payload.comment.author_association;
-            
-            // Check permissions
-            const hasPermission = (
-              authorAssociation === 'OWNER' ||
-              authorAssociation === 'MEMBER' ||
-              authorAssociation === 'COLLABORATOR'
-            );
-            
-            core.setOutput('comment_body', commentBody);
-            core.setOutput('has_permission', hasPermission);
-            
-            if (!hasPermission && (commentBody === '!deploy' || commentBody === '!undeploy')) {
-              core.setOutput('permission_denied', 'true');
-              return;
-            }
-            
-            if (commentBody !== '!deploy' && commentBody !== '!undeploy') {
-              return;
-            }
-            
-            // Process deploy command
-            if (commentBody === '!deploy') {
-              core.setOutput('should_deploy', 'true');
-            }
-            // Process undeploy command
-            else if (commentBody === '!undeploy') {
-              core.setOutput('should_undeploy', 'true');
-            }
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Set Locale
+      run: |
+        sudo apt-get install tzdata locales -y && sudo locale-gen en_US.UTF-8
+        sudo localectl set-locale LANG="en_US.UTF-8"
+        export LANG="en_US.UTF-8"
+        sudo update-locale
+        locale -a
+        locale
+        locale -c -k LC_NUMERIC
+        localectl status
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install --upgrade pip
+        pip install --upgrade wheel
+        pip install --upgrade seleniumbase
+        pip install --upgrade pyautogui
+        pip install --upgrade pymongo
+        pip install --upgrade python-xlib
+    - name: Lint with flake8
+      run: |
+        pip install flake8
+        # Stop the build if there are flake8 issues
+        # flake8 . --count --show-source --statistics --exclude=temp
+    - name: Install Chrome
+      if: matrix.os == 'ubuntu-20.04'
+      run: |
+        sudo apt install google-chrome-stable
+    - name: Check the console scripts interface
+      run: |
+        seleniumbase
+        sbase
+    - name: Install chromedriver
+      run: |
+        seleniumbase install chromedriver
+    - name: Make sure pytest is working
+      run: |
+        echo "def test_1(): pass" > nothing.py
+        pytest nothing.py --uc
+    - name: Check which Chrome binaries exist
+      run: |
+        python -c "import os; print(os.path.exists('/usr/bin/google-chrome'))"
+        python -c "import os; print(os.path.exists('/bin/google-chrome-stable'))"
+        python -c "import os; print(os.path.exists('/bin/chromium-browser'))"
+        python -c "import os; print(os.path.exists('/bin/chromium'))"
+    - name: Display Chrome binary that's used
+      run: |
+        python -c "from seleniumbase.core import detect_b_ver; print(detect_b_ver.get_binary_location('google-chrome'))"
+        python -c "from seleniumbase import undetected; print(undetected.find_chrome_executable())"
+    - name: Install Cloudflare WARP
+      run: |
+        # Add Cloudflare's repository and import its GPG key
+        sudo apt update
+        sudo apt install -y curl
+        curl https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
 
-      - name: Post permission denied comment
-        if: steps.check_status.outputs.permission_denied == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `❌ **Permission denied**: Only the repository owners, members, or collaborators can use deployment commands.`
-            });
+        # Install the WARP client
+        sudo apt update
+        sudo apt install -y cloudflare-warp
 
-      - name: Get PR details for deployment
-        id: pr_details
-        if: steps.check_status.outputs.should_deploy == 'true' || steps.check_status.outputs.should_undeploy == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number
-            });
-            core.setOutput('pr_number', pr.data.number);
-            core.setOutput('pr_title', pr.data.title);
-            core.setOutput('pr_state', pr.data.state);
-          
-      - name: Dispatch Deploy Event
-        if: steps.check_status.outputs.should_deploy == 'true'
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.DISPATCH_TOKEN }}
-          repository: Significant-Gravitas/AutoGPT_cloud_infrastructure
-          event-type: pr-event
-          client-payload: |
-            {
-              "action": "deploy",
-              "pr_number": "${{ steps.pr_details.outputs.pr_number }}",
-              "pr_title": "${{ steps.pr_details.outputs.pr_title }}",
-              "pr_state": "${{ steps.pr_details.outputs.pr_state }}",
-              "repo": "${{ github.repository }}"
-            }
+        # Register WARP (replace with your WARP credentials if needed)
 
-      - name: Post deploy success comment
-        if: steps.check_status.outputs.should_deploy == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `🚀 **Deploying PR #${{ steps.pr_details.outputs.pr_number }}** to development environment...`
-            });
-
-      - name: Dispatch Undeploy Event (from comment)
-        if: steps.check_status.outputs.should_undeploy == 'true'
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.DISPATCH_TOKEN }}
-          repository: Significant-Gravitas/AutoGPT_cloud_infrastructure
-          event-type: pr-event
-          client-payload: |
-            {
-              "action": "undeploy",
-              "pr_number": "${{ steps.pr_details.outputs.pr_number }}",
-              "pr_title": "${{ steps.pr_details.outputs.pr_title }}",
-              "pr_state": "${{ steps.pr_details.outputs.pr_state }}",
-              "repo": "${{ github.repository }}"
-            }
-
-      - name: Post undeploy success comment
-        if: steps.check_status.outputs.should_undeploy == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `🗑️ **Undeploying PR #${{ steps.pr_details.outputs.pr_number }}** from development environment...`
-            });
-
-      - name: Check deployment status on PR close
-        id: check_pr_close
-        if: github.event_name == 'pull_request' && github.event.action == 'closed'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const comments = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number
-            });
-            
-            let lastDeployIndex = -1;
-            let lastUndeployIndex = -1;
-            
-            comments.data.forEach((comment, index) => {
-              if (comment.body.trim() === '!deploy') {
-                lastDeployIndex = index;
-              } else if (comment.body.trim() === '!undeploy') {
-                lastUndeployIndex = index;
-              }
-            });
-            
-            // Should undeploy if there's a !deploy without a subsequent !undeploy
-            const shouldUndeploy = lastDeployIndex !== -1 && lastDeployIndex > lastUndeployIndex;
-            core.setOutput('should_undeploy', shouldUndeploy);
-            
-      - name: Dispatch Undeploy Event (PR closed with active deployment)
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.action == 'closed' &&
-          steps.check_pr_close.outputs.should_undeploy == 'true'
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.DISPATCH_TOKEN }}
-          repository: Significant-Gravitas/AutoGPT_cloud_infrastructure
-          event-type: pr-event
-          client-payload: |
-            {
-              "action": "undeploy",
-              "pr_number": "${{ github.event.pull_request.number }}",
-              "pr_title": "${{ github.event.pull_request.title }}",
-              "pr_state": "${{ github.event.pull_request.state }}",
-              "repo": "${{ github.repository }}"
-            }
-
-      - name: Post PR close undeploy comment
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.action == 'closed' &&
-          steps.check_pr_close.outputs.should_undeploy == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `🧹 **Auto-undeploying**: PR closed with active deployment. Cleaning up development environment for PR #${{ github.event.pull_request.number }}.`
-            });
+        sudo warp-cli --accept-tos registration new
+        sudo warp-cli --accept-tos connect
+        sleep 5
+        sudo warp-cli --accept-tos status
+    - name: Run python test.py --debug
+      run: |
+        python test.py --debug --chrome --xvfb
